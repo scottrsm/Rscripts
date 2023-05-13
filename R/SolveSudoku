@@ -1,0 +1,372 @@
+#!/usr/bin/env Rscript
+
+## AUTHOR: Roland Scott McIntire
+## DATE  : Dec 11, 2022
+## DESCRIPTION: Solves Sudoku files in format:
+##              9x9 row/column separated by commas.
+##              Uses "0", "", ".", or "NA" to indicate unknown values.
+## NOTE       : The names of R values or variables are listed in comments as <VALUE> or <VARIABLE>
+##              That is, they are surrounded by angle brackets. 
+##              Examples: The R value NA is written: <NA>. The variable mat is written: <mat>.
+## PACKAGES   : optparse
+## EXAMPLE    : SolveSudoku .../puzzles/spzm.csv -o spzm_sol.csv
+
+
+## Needed to parse command line.
+library(optparse)
+
+###--------------------------------------------------------------------------------------
+###----------------   GLOBAL VARS  ------------------------------------------------------
+###--------------------------------------------------------------------------------------
+## Variable used to count recursion depth.
+GLOBAL.RECUR           <- 0
+
+## Variable used to store the largest recursion depth encountered.
+GLOBAL.MAX_RECUR_DEPTH <- 0
+
+
+
+###--------------------------------------------------------------------------------------
+###----------------   FUNCTIONS   -------------------------------------------------------
+###--------------------------------------------------------------------------------------
+
+## DESCRIPTION: Solves a Sudoku puzzle represented by the 9x9 matrix, <mat>.
+## Params: 
+##  mat     -- A 9x9 matrix consisting of value in the set: {<NA>, <SET>}.
+##  SET     -- A set of valid values. For Sudoku these are: {1,2,3,4,5,6,7,8,9}.
+##  verbose -- A boolean flag. Print's more details if TRUE.
+## Return: A named list: ok  -- Boolean. Success if TRUE.
+##                       sol -- A 9x9 solution matrix if successful; a slightly modified 
+##                              version of the original matrix, <mat>, otherwise.
+solve_sudoku <- function(mat, SET=1:9, verbose=FALSE) {
+
+  ## Update function call level...
+  ## Also, adjust the maximum recursion depth.
+  if (GLOBAL.MAX_RECUR_DEPTH < GLOBAL.RECUR) {
+    GLOBAL.MAX_RECUR_DEPTH <<- GLOBAL.RECUR
+  }
+  if (verbose) {
+    cat("Recursion Level = ", GLOBAL.RECUR, "\n")
+  }
+  GLOBAL.RECUR <<- GLOBAL.RECUR + 1
+
+  ## Assume there are easy wins -- can fill in a <NA> because there is only one choice -- for at least one empty cell.
+  ## We loop filling in as much as we can. After each fill, we continue to loop, reevaluating the <to_fill_mat>
+  ## matrix to see what has changed.
+  easy_mode <- TRUE
+  while (easy_mode) {
+    ## Turn off easy mode -- need to demonstrate that we can stay in easy mode for this iteration.
+    easy_mode <- FALSE
+
+    ## The matrix, <to_fill_mat, is an nx2 list of (row, col) values of empty cells that need to be filled.
+    to_fill_mat <- which(is.na(mat), arr.ind=TRUE)
+    n <- nrow(to_fill_mat)
+
+    ## If there are no <NA>s -- we're done, return the current matrix as this is the solution.
+    ## This is a true solution and not an error, as we have checked the initial puzzle 
+    ## and only allowed correct fillings to this point.
+    if (n == 0) {
+      GLOBAL.RECUR <<- GLOBAL.RECUR - 1
+      return(list(ok=TRUE, sol=mat))
+    }
+    
+    ## Walk over each row,col of <NA> values in the matrix. 
+    ## For each empty cell at (row,col), collect all of the non-NA values for that row and column in the matrix, <mat>.
+    ## Each row,col <NA> belongs to a block -- get all non-NA values in the block.  
+    ## If the only choice left for this row,col is one value ([1,9] minus the union_of_above), then we can fill in the
+    ## value of this row,col. Loop back and continue, get collection of non-filled values in the matrix...
+    ## Otherwise, if we didn't find any empty cell with only one fill choice, stop the loop.
+    ## This means there are no more easy cells to fill.
+    ## If we find a cell which has NO valid choices, then the puzzle can't be solved, return with an error.
+    for (i in 1:n) {
+      cell  <- to_fill_mat[i, ]
+      rvals <- getPos (mat[cell[1],        ], SET=SET) # All the entries in the cell's row.
+      cvals <- getPos (mat[       , cell[2]], SET=SET) # All the entries in the cell's column.
+      bvals <- getBPos(cell, mat            , SET=SET) # All the entries in the cell's mini-block.
+
+      ## <vals> is then set to the values not taken in the corresponding row, column, and mini-block.
+      ## <vals> is then set to the values not taken in the corresponding row, column, and mini-block.
+      vals  <- SET[!SET %in% unique(c(rvals, cvals, bvals))]
+      
+      if (length(vals) == 0) {        # If there are no choices for us to fill -- this puzzle has no solutions.
+        GLOBAL.RECUR <<- GLOBAL.RECUR - 1
+        return(list(ok=FALSE, sol=mat))
+      } else if (length(vals) == 1) { # Else, we have only one choice for this cell 
+                                      # -- fill it and set the problem state to easy_mode 
+                                      # -- keep(looping) looking for easy fills.
+        mat[cell[1], cell[2]] <- vals[1]
+        easy_mode <- TRUE
+      }
+    }
+  }
+
+  ##  -------------------
+  ##  EASY_MODE IS OVER!
+  ##  -------------------
+  ## We filled in all of the easy empty cells through the process above.
+  ## We now order the holes in the matrix by the length of the possibilities
+  ## from the smallest number of possibilities to the largest.
+  ## We then loop over the possibilities of one of the smallest of these;
+  ## trying each possible value for that particular empty cell, then recursing
+  ## with the new adjusted matrix.
+
+  ## Get the list of potential values for each empty cell in the matrix.
+  n <- nrow(to_fill_mat)
+  lst <- vector(mode="list", n)
+  for (i in 1:n) {
+    cell     <- to_fill_mat[i, ]
+    rvals    <- getPos (mat[cell[1],        ], SET=SET) # All the entries in the cell's row.
+    cvals    <- getPos (mat[       , cell[2]], SET=SET) # All the entries in the cell's column.
+    bvals    <- getBPos(cell, mat            , SET=SET) # All the entries in the cell's mini-block.
+
+    ## <vals> is then set to the values not taken in the corresponding row, column, and mini-block.
+    vals     <- SET[!SET %in% unique(c(rvals, cvals, bvals))]
+    lst[[i]] <- vals
+  }
+
+  ## Order the list of potential values by the length of possibilities from smallest to largest.
+  ## (Although <lst> is a list, sapply gives us a vector -- <lens>.)
+  lens    <- sapply(lst, length)
+  ord     <- order(lens)
+  choices <- lst[ord][[1]]
+
+  ## Get an empty cell with the least number of potential choices.
+  ## We know that such a least number is > 1 because we have dealt with the cases when n was 0 and 1.
+  cell <- to_fill_mat[ord[1], ]
+  n    <- length(choices)
+
+  ## Walk over the possibilities for this empty cell and call the solver.
+  res <- NULL
+  for (i in 1:n) {
+    ## We are mutating <mat> at the same spot, so we don't need to reset <mat> before mutating again.
+    mat[cell[1], cell[2]] <- choices[i]
+
+    ## RECURSIVELY SOLVE...
+    res <-solve_sudoku(mat, SET=SET, verbose=verbose)
+
+    ## If successful, break out of the loop.
+    if (res$ok) {
+      break
+    }
+  }
+
+  ## Return with a response: If successful, the solution; otherwise, the matrix passed in to the function
+  ## with cell entry (cell[1], cell[2]) modified to be the last entry of <choices>.
+  GLOBAL.RECUR <<- GLOBAL.RECUR - 1
+  return(res)
+}
+
+
+
+## DESCRIPTION: Gets the non-NA values in <vec>.
+## Params:
+##  vec -- A numeric vector -- assumed to have values in the set: {<NA>, <SET>}.
+##  SET -- A set of valid values.
+## Return: The set of valid values in <vec>.
+getPos <- function(vec, SET=1:9) {
+  vec[vec %in% SET]
+}
+
+## DESCRIPTION: Gets the non-NA values in a mini-block containing <cell>.
+##              A mini-block is one of the 9 Sudoku 3x3 blocks.
+## DETAILS    : Use down -> over -> up to help with location and manipulation of the indices in a mini-block.
+## Params:
+##  cell -- The row,col vector describing a position in the matrix, <mat>, using a 1-based index.
+##  mat  -- A 9x9 matrix of values in the set: {NA, <SET>}.
+##  SET  -- A set of valid values.
+## Return: The set of valid values in the mini-block containing <cell>.
+getBPos <- function(cell, mat, SET=1:9) {
+  ri   <- (cell[1]-1) %/% 3 # Get the mini-block index for its row in <mat>    -- zero based index.
+  ci   <- (cell[2]-1) %/% 3 # Get the mini-block index for its column in <mat> -- zero based index.
+
+  ## Pull out all values in the mini-block -- one based index.
+  vals <- as.numeric(mat[((ri*3)+1):((ri*3) + 3), ((ci*3)+1):((ci*3) + 3)])       
+  vals[vals %in% SET]
+}
+
+#### DESCRIPTION: Checks that the puzzle represented by <mat> is a valid Sudoku puzzle.
+#### ASSUMES    : The function assumes that the Sudoku file has been read and 
+####              converted to a matrix. Further, all characters representing
+####              empty cells have been converted to <NA>.
+## Params:
+##  mat   -- Sudoku matrix.
+##  SET   -- The list of valid values to use in the puzzle.
+## Return: A string of error messages. If no errors, returns "".
+##         That is, returns an empty string, "", if and only if there are no errors.
+checkPuzzle <- function(mat, SET=1:9) {
+  errMsg   <- ""
+  badShape <- FALSE
+  rowDup   <- FALSE 
+  colDup   <- FALSE 
+  miniDup  <- FALSE
+
+  ## Check if the puzzle is a 9x9 matrix.
+  if ( ! all(dim(mat) == c(9,9)) ) {
+     errMsg   <- c(errMsg, "Puzzle is not a 9x9 matrix.")
+     badShape <- TRUE
+  }
+
+  ## Check for bad values in the matrix.
+  badVals <- mat[!mat %in% unique(c(as.character(SET), NA))] 
+  if ( length(badVals) > 0) {
+    errMsg <- c(errMsg, paste0("Puzzle contains the following illegal character(s): ", paste0(badVals)))
+  }
+
+  ## Check that we have rows in the matrix.
+  n <- length(mat)
+  if (0 == n) {
+    errMsg <- c(errMsg, paste0("There are no rows in this puzzle."))
+    return(paste(errMsg, "\n"))
+  }
+
+  ## Walk over each element in the matrix and check for consistency of its row, column, and mini-block.
+  for (k in 1:n) {
+    ## Need to get the cell of the value <k>. We must go back and forth between a 1 based index and a zero based index.
+    cell  <- c(((k-1) %/% 9) + 1, ((k-1) %% 9) + 1) 
+    rvals <- getPos(mat[cell[1],        ], SET=SET)
+    cvals <- getPos(mat[       , cell[2]], SET=SET)
+
+    ## Check that there are no duplicate entries in its row.
+    if (length(rvals) != length(unique(rvals))) {
+      if (! rowDup ) {
+        errMsg <- c(errMsg, paste0("Puzzle contains at least one row with a duplicate value.")) 
+        rowDup <- TRUE
+      }
+    }
+    ## Check that there are no duplicate entries in its column.
+    if (length(cvals) != length(unique(cvals))) {
+      if (! colDup ) {
+        errMsg <- c(errMsg, paste0("Puzzle contains at least one column with a duplicate value.")) 
+        colDup <- TRUE
+      }
+    }
+    ## Check that there are no duplicate entries in its mini-block.
+    if (!badShape) {
+      bvals <- getBPos(cell, mat           , SET=SET)
+      if (length(bvals) != length(unique(bvals))) {
+        if (! miniDup ) {
+          errMsg  <- c(errMsg, paste0("Puzzle contains at least one min-block with a duplicate value.")) 
+          miniDup <- TRUE
+        }
+      }
+    }
+  }
+
+  ## Return any errors, If <errMsg> is an empty string, there is no error.
+  return(paste(errMsg, "\n"))
+}
+
+
+###--------------------------------------------------------------------------------------
+###----------------   MAIN   ------------------------------------------------------------
+###--------------------------------------------------------------------------------------
+
+## Characters that represent an empty cell.
+NASTRINGS=c("0", "NA", ".", "")
+NAHELP <- paste0("                Use any of {\"", paste0(NASTRINGS, collapse="\", \""), "\"} to represent empty cells.")
+
+## Help message. Used when user types: SolveSudoku -h.
+helpMsg <- paste("         The input puzzle file format is:",
+                 "                9x9 row/column separated by commas",
+                 NAHELP,
+                 "                Sample Puzzle:\n" ,
+                 "                0,0,0,2,6,0,7,0,1",
+                 "                6,8,0,0,7,0,0,9,0",
+                 "                1,9,0,0,0,4,5,0,0",
+                 "                8,2,0,1,0,0,0,4,0",
+                 "                0,0,4,6,0,2,9,0,0",
+                 "                0,5,0,0,0,3,0,2,8",
+                 "                0,0,9,3,0,0,0,7,4",
+                 "                0,4,0,0,5,0,0,3,6",
+                 "                7,0,3,0,1,8,0,0,0",
+                 sep="\n")
+
+## User command line options.
+option_list <- list( make_option(c("-o", "--solFile")       ,
+                                action ="store"             ,
+                                type   ="character"         ,
+                                metavar="Solution_file_name",
+                                default=""                  ,
+                                help   ="Solution file name: format same as input file (See below).",
+                                ),
+                    make_option(c("-v", "--verbose")  ,
+                                action ="store_true"  ,
+                                type   ="logical"     ,
+                                metavar="Verbose Flag",
+                                default=FALSE         ,
+                                help   ="Set output to be verbose.",
+                                )
+                    )
+
+
+## Parse the command line arguments.
+opt <- parse_args2(OptionParser(usage="SolveSudoku [-h] [-v] [-o output_file_name] puzzle_file", option_list=option_list, epilogue=helpMsg))
+
+## This is the puzzle file.
+puzzle_file <- opt$args[[1]]
+
+## Check that the puzzle file exists...
+if ( !file.exists(puzzle_file) ) {
+  cat("ERROR(SolveSudoku): The Sudoku puzzle file, \"", opt$options$puzzle, "\", does not exist.\n", sep="")
+  q(status=1)
+}
+
+
+## Read in the user specified puzzle file.
+df <- read.table(puzzle_file, header=FALSE, sep=",", stringsAsFactors=FALSE, colClasses="character")
+
+## Convert the puzzle to a matrix.
+mat <- as.matrix(df)
+mat[mat %in% NASTRINGS] <- NA
+colnames(mat) <- NULL
+
+## Check that the puzzle is in the correct format.
+errMsg <- checkPuzzle(mat)
+if (length(errMsg) > 1) {
+   cat("ERROR(SolveSudoku): This Sudoku puzzle does not have the correct format: ", errMsg, "\n")
+   cat("\nABORTING, no action taken.\n")
+   q(status=2)
+}
+
+
+## Try to find a solution.
+res <- solve_sudoku(mat, verbose=opt$options$verbose)
+
+## Display input puzzle.
+cat("PUZZLE:\n", sep="")
+
+## Display empty cells as blanks.
+for (i in seq_along(NASTRINGS)) {
+  df[df == NASTRINGS[i]] <- " "
+}
+
+## Print the PUZZLE to the terminal with terminal formatting.
+dfo <- cbind(data.frame(XXXX=rep(" ", 9), stringsAsFactors=FALSE), df, data.frame(ZZZZ=rep(" ", 9), stringsAsFactors=FALSE))
+cat(" ___________________\n", sep="")
+write.table(dfo, file=stdout(), quote=FALSE, row.names=FALSE, col.names=FALSE, sep="|", na=" ")
+cat(" -------------------\n", sep="")
+
+## If we found a solution, print the answer to the terminal; otherwise, indicate infeasibility.
+if (res$ok) {
+  cat("\nSOLUTION:\n", sep="")
+  ds <- as.data.frame(res$sol)
+  ds[ds %in% NASTRINGS] <- " "
+  dso <- cbind(data.frame(XXXX=rep(" ", 9), stringsAsFactors=FALSE), ds, data.frame(ZZZZ=rep(" ", 9), stringsAsFactors=FALSE))
+  cat(" ___________________\n", sep="")
+  write.table(dso, file=stdout(), quote=FALSE, row.names=FALSE, col.names=FALSE, sep="|", na=" ")
+  cat(" -------------------\n", sep="")
+  cat("\nMaximum recursion depth = ", GLOBAL.MAX_RECUR_DEPTH, "\n", sep="")
+} else {
+  cat("No solution found!\n", sep="")
+}
+
+
+## If there is an output file, place the solution there.
+if (opt$options$solFile != "") {
+  ds <- as.data.frame(res$sol)
+  write.table(ds, file=opt$options$solFile, quote=FALSE, row.names=FALSE, col.names=FALSE, sep=",")
+}
+
+## Exit successfully.
+q(status=0)
+
